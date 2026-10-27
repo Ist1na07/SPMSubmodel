@@ -1,67 +1,58 @@
-# Research and evaluation
+# Model design and evaluation
 
 [简体中文](research.zh-CN.md) · [Usage](../README.md)
 
-## Design
+## Components
 
-The baseline is SPM Rating 1.2.0-rc3 at commit `a914a405d8e9a77f94c0518567c37511b0b7ac05`, using its `detail` parameters. The previous submodel was built on SPM 1.0.0: it rated the head-only chart for RC and reweighted the original difficulty curve for LN. It assumed a single-level power-mean aggregation and treated several curves as independent of long notes.
+The model uses SPM Rating 1.2.0-rc3 at commit `a914a405d8e9a77f94c0518567c37511b0b7ac05`. The parser embeds 4K and 6K charts in the seven-column frame; the scorer evaluates both the original and mirror views, combines their release demand, and includes shared-hand and finger-occupation costs. Recovery, cross-column transitions, the two-level section/window aggregate, and the fractional-time shared-phase extension are supplied by SPM Rating. The default `detail` model retains a conditional hold-duration component; the `compact` model disables it.
 
-The new scorer evaluates both the chart and its mirror, shares their averaged release curve, and combines each view with shared-hand contact costs and a cost for actions after finger occupation. It also uses continuous recovery and cross-column transition fields, a two-level section/window aggregate, and a shared-phase extension for fractional times. These details are retained in the full score and both branches. SPM's detail model retains a conditional hold-duration component; its compact model disables that component. The implementation makes a separate head-only structure and recalculates the long-note-sensitive numerical curves, sharing the parsed notes, head-based hand-contact and recovery calculations, and the original difficulty field used for LN. Charts without long notes reuse the full score directly for RC. This avoids a third full model run while preserving the independent head-only definition.
+SPM, RC and LN share parsing, the head-based hand-contact and recovery calculations, and the full-chart difficulty field. RC also computes a difficulty field from a copy of the notes in which each long note is replaced by a tap at its head. A tap-only chart reuses its SPM score for RC. Input validation follows upstream physical-object rules.
 
-### RC
+## LN difficulty
 
-Replace each long note with a tap at the same head time and physical column and compute its SPM difficulty field. `rc_head_only` aggregates that field exactly as SPM does. For `rc`, first use the LN presence `g` and coverage `c` described below to change each row's engagement mass:
+For each row, the presence indicator marks an active long-note body, a long-note head, or the first row at or after a long-note tail. A tail later than the final row has no next row to mark. The indicator is smoothed with a 700 ms centered window, then square-rooted to give `g` between zero and one.
 
-`adjusted mass = original mass × (1 − 0.95 × clamp((1 − c) / 0.20, 0, 1) × g)`.
+The original SPM two-level aggregate multiplies the engagement mass of each row by `g`, preserving the section and window geometry and the difficulty curve. Coverage `c` is the ratio of weighted to original engagement mass. SPM postprocessing uses `head_count × c` as its effective count, and the raw LN score is multiplied by `min(c / 0.40, 1)`. Reference-scale output uses the upstream per-key-count alignment. A chart with no long notes has zero LN difficulty. The LN score includes ordinary-note demand in long-note regions alongside release, coordination and finger-occupation demand.
 
-The existing section and window geometry, two power means, head count and SPM postprocessing are retained. When coverage is at most 0.8, a fully LN-present row retains 5% of its original mass; this still gives every section a contribution. Above 0.8, the modulation gradually fades, and at full coverage the original head-only aggregation is used. A tap-only chart has no LN signal, so both RC values equal SPM. A mixed chart's RC value may rise or fall according to the relative difficulty of its tap and LN regions. The original chart is validated before transformation, including the upstream rules for duplicate and conflicting objects.
+## RC difficulty
 
-### LN
+The head-only difficulty field is aggregated using the same two-level windows as SPM. Each window's contribution is adjusted using its **local LN and RC difficulty estimates**, both measured in native difficulty-field units:
 
-1. Mark rows with an active long-note body, a long-note head, or the next row at or after a long-note tail. Heads and tails come from individual objects. A tail after the final row has no next row to mark.
-2. Smooth the presence signal with SPM's 700 ms centered window and take its square root, yielding a row weight `g` between zero and one.
-3. Multiply the SPM two-level aggregation's row engagement mass by `g`, keeping its original section and window geometry, power means, difficulty field and hold-aware weighting. Coverage `c` is the sum of weighted mass divided by the original mass.
-4. Apply the SPM postprocessing with an effective head count of `head_count × c`. Multiply the resulting raw LN score by `min(c / 0.40, 1)`. Finally apply the upstream reference alignment if requested.
+1. The RC estimate is the window's engagement-weighted power mean of the head-only field.
+2. The LN estimate uses the full field, with engagement mass weighted by `g`. The window's LN coverage, defined using that same mass, supplies an exposure factor `min(window_coverage / 0.40, 1)`. This mirrors the LN branch's focus on long-note regions while keeping the two local estimates on comparable units.
+3. The local ratio is `q = clamp(local_LN / max(local_RC, 1e-9), 0, 1)`.
+4. The whole-chart ratio is `r = LN_score / max(head_only_score, 1e-9)`, using native postprocessed scores before reference alignment. Modulation strength is `0.90 × clamp((1.60 − r) / 0.40, 0, 1)`.
+5. Multiply the window's RC engagement mass by `1 − strength × q`, then aggregate the window difficulties using SPM's second-level power mean and postprocessing.
 
-On a fully covered chart, the weighting and count approach the SPM calculation. On a chart without long notes, coverage and LN difficulty are zero. A mixed section retains ordinary-note difficulty alongside its long-note coordination, release, and finger-occupation costs. The coverage reduction describes whole-chart exposure, and a difficult long-note passage can still score highly when it occupies a substantial fraction of the chart.
+The minimum window weight is 10% of its original mass. A high local LN-to-RC difficulty ratio reduces that window's contribution; an LN-dominated whole chart receives less modulation. The weights can either raise or lower the final RC score depending on the distribution of difficulty. All three outputs use the same selected `raw` or `reference` scale. The reference alignments are specific to each key count.
 
-For fractional timestamps, each shared rounding phase computes these steps separately, and the raw branch scores are averaged before the reference alignment. Reported coverage is the phase-weighted average; applying the formula to that average alone need not reproduce the LN score.
+For fractional original timestamps, each shared rounding phase computes the fields, local ratios and branch scores separately. Raw scores are averaged over phases before reference alignment. Coverage is also averaged over phases.
 
 ## Parameter selection
 
-The presence window and square-root smoothing were carried over from the previous submodel. On the supplied 7K development labels, coverage thresholds 0.05, 0.10, 0.15, 0.20, 0.30 and 0.40 and attenuation exponents 0.5 and 1 were compared. A linear reduction with threshold 0.40 reduced the 90th percentile of `below_range` scores from 6.95 to 0.48 on the reference scale; valid-LN Spearman changed from 0.98467 to 0.98515 and MAE from 0.2701 to 0.2664. `python evaluation/calibrate.py` reproduces the candidate comparison using the saved integer-time scores. The threshold is a practical choice within this panel, not a measurement of a universal boundary. The 4K and 6K courses provide a separate alignment check; they do not provide full branch labels. No per-key branch scale multiplier was fitted.
+The 7K development set supplied the full branch labels used to choose RC parameters. The parameter grid compared strengths 0.75, 0.90 and 0.97, and whole-chart ratio limits 1.40, 1.60, 1.80 and 2.00, with fade width 0.40. The chosen strength 0.90 and limit 1.60 provide a balance between label agreement on mixed charts and a gradual fade on LN-dominated charts. `python evaluation/experiment_rc.py` reproduces the grid on the supplied integer-time charts. The window and whole-chart LN exposure threshold is 0.40.
 
-For RC, the same 7K development collection was used to compare strengths 0.50, 0.80, 0.95, 0.99 and fade widths 0.10, 0.20, 0.40. The selected 0.95 / 0.20 combination balances the HB label improvement with a nonzero minimum section weight and a gradual return to the head-only result on LN-dominated charts. `python evaluation/experiment_rc.py` reproduces the grid. These choices and the original SPM model were evaluated on development data, so further testing on independently labeled charts is needed.
+These parameters were selected on the available data. New independently labeled mixed charts and full 4K/6K branch labels would help assess transfer and whether different difficulty distributions need further treatment. The compact model has consistency tests; the numerical evaluation below uses the detailed model.
 
-## Results
+## Evaluation
 
-The tables use `detail` and upstream `reference` scores. Spearman correlation measures ordering; MAE is the direct mean absolute difference on the relevant reference label scale, without fitting a new regression. Labels marked `below_range` are excluded from numerical LN-label metrics. A missing branch label is not treated as zero. The two records sharing a 7K beatmap are retained as separate labels. All supplied labels and maps were available during development, so the results are in-sample rather than an independent estimate of generalization.
+Scores use the corresponding upstream `reference` scale. Spearman correlation measures ordering. MAE is the direct mean absolute difference against the labels, with no fitted regression. Missing branch labels are omitted; LN labels marked `below_range` are omitted from the numerical LN comparison. The 7K set has 332 charts and 334 label records, with two charts each having two label records. The data was available during development, so these results are in-sample.
 
-The current results were calculated directly with the mixed-chart RC modulation. All supplied charts use integer original-clock times. The saved earlier LN evaluation applied its final coverage reduction by converting intermediate results; sampled values agree with fresh scoring up to floating-point rounding.
-
-| 7K comparison | Labels | Spearman | Direct MAE |
+| 7K comparison | Records | Spearman | Direct MAE |
 |---|---:|---:|---:|
-| SPM vs overall | 334 | 0.98989 | 0.2303 |
-| RC vs RC | 200 | 0.98704 | 0.2353 |
-| Head-only SPM vs RC | 200 | 0.98305 | 0.2698 |
-| SPM vs RC, comparison | 200 | 0.98004 | 0.3239 |
-| LN vs valid LN | 180 | 0.98515 | 0.2664 |
-| SPM vs valid LN, comparison | 180 | 0.98789 | 0.2424 |
+| SPM and overall labels | 334 | 0.98989 | 0.2303 |
+| RC and RC labels | 200 | 0.98436 | 0.2561 |
+| LN and valid LN labels | 180 | 0.98515 | 0.2664 |
+| RC and RC labels on HB charts | 49 | 0.98329 | 0.3171 |
 
-Among 49 HB records with RC labels, the head-only baseline has MAE 0.3840, bias −0.2912 and Spearman 0.98360; the adjusted RC has MAE 0.2343, bias −0.0274 and Spearman 0.98600. Absolute error improves for 38 records and worsens for 11. One counterexample is `bm_0202`, whose RC error rises from +0.829 to +1.068. Among 146 RC-type labels, the median and 90th percentile of `abs(RC − SPM)` are 0.0000 and 0.0295. Among 130 LN-type labels, `abs(RC − rc_head_only)` has median 0.0000 and 90th percentile 0.0199. For the same LN group, `abs(LN − SPM)` has median 0.0035 and 90th percentile 0.0694. The 144 `below_range` records have median LN 0, 90th percentile 0.475, and maximum 8.105. For example, `bm_0204` has coverage 0.373 and LN 8.105 despite a `below_range` annotation.
+The HB RC mean signed error is −0.1512. Among 144 records with `below_range` LN labels, the LN score has median 0, 90th percentile 0.475 and maximum 8.105. Chart `bm_0204` is one example with a high LN score despite a `below_range` label; it is useful for investigating how local long-note passages relate to the annotation.
 
-For 4K, SPM vs overall has correlation 0.98833 on 741 labeled records. The RC branch correlates 0.98597, 0.98780, 0.98223 and 0.99050 with the overall labels for the jack, speed, stamina and tech subsets respectively; the LN branch correlates 0.98477 with overall labels in the LN subset. These are subset-level checks because 4K lacks complete branch labels.
+For 4K and 6K the available labels are overall difficulty labels, so they cannot directly validate individual branches. On 4K, SPM and overall labels have Spearman 0.98833 across 741 labeled records. RC and overall labels have correlations 0.98615, 0.98738, 0.98221 and 0.99070 for the jack, speed, stamina and tech subsets; LN and overall labels have correlation 0.98477 in the LN subset. On 2,343 scored 6K records, SPM and overall labels have Spearman 0.95722. The remaining chart, `bm6k_1460`, has conflicting simultaneous objects on one physical key and is rejected by the upstream input rules.
 
-For 6K, SPM vs overall has correlation 0.95722 on 2,343 scored records. One additional chart, `bm6k_1460`, has conflicting simultaneous objects on the same physical key and is rejected by the upstream input rules; its failure is recorded in the results file.
+For the course checks, score is fitted linearly against dan on each RC and LN ladder. Over the overlapping integer dan range, the mean absolute difference of the fitted ladders is 0.235 on 4K dan 1–15 and 0.672 on 6K dan 0–9, in each key count's own reference scale. The 4K REFORM alpha through epsilon courses are interpreted as dan 11–15. For 7K, gamma, azimuth, zenith and stellium correspond to dan 11–14; the numerical `sr` labels are used as supplied and retain their dataset conversion.
 
-Across the 744 scored 4K charts, the absolute RC change from the head-only baseline has a 90th percentile of 0.0877 and a maximum of 0.6382 in the 4K reference scale. Across 2,343 scored 6K charts these values are 0.5539 and 2.0791 in the separate 6K reference scale. These changes need further study with 4K and 6K branch labels.
+## Checks and research directions
 
-The courses use independent per-mode reference units. A linear fit of score against dan is compared over the overlapping integer dan range; duplicate course levels remain separate observations. The fitted mean absolute difference between LN and RC ladders is 0.234 for 4K dan 1–15 and 0.671 for 6K dan 0–9. The fitted difference changes from +0.523 to −0.298 in 4K, and from +1.130 to −1.284 in 6K. Course ladders are approximate anchors and their differing slopes remain visible. Individual nodes and fits can be regenerated with `evaluation/report.py`.
+The test suite checks SPM against independent upstream scoring, pure taps, symmetry, speed changes, fractional time, scale conversion and invalid input. A controlled test varies the LN difficulty field while keeping the presence pattern and RC field fixed, and checks the resulting RC weighting. Dataset results and failure records can be generated locally with `evaluation/run.py` and summarized with `evaluation/report.py`.
 
-4K REFORM alpha through epsilon are interpreted as dan 11–15. For 7K, gamma, azimuth, zenith and stellium refer to dan 11–14. The 7K branch comparison uses the numerical `sr` values already supplied in `labels.json`; its dataset metadata records the separate conversion used to produce those values. The course-name numbering is not substituted into those numeric labels.
-
-## Verification and further work
-
-Automated tests compare SPM and the head-only RC baseline against independent upstream calls across 4K, 6K, 7K, both models, taps, mixed patterns, long notes and speed changes. They check that harder tap sections increase the adjusted RC value and harder LN sections can decrease it, as well as mirror symmetry, fractional-time averaging, scale conversion, cancellation and invalid input. LN and the adjusted RC reuse already computed difficulty fields.
-
-The LN threshold and old smoothing parameters need validation on fresh, independently labeled mixed charts. Full RC/LN labels for 4K and 6K would clarify transfer across modes. Fractional charts with many phase breakpoints, headless holds and segments need dedicated performance or interface work. Tests cover compact model consistency, while its branch calibration and dataset quality remain to be studied. The evaluation scripts generate chart-level scores and failure records locally in `results/`.
+Useful follow-up work includes fresh mixed-chart branch labels, matched examples with similar long-note quantities but different coordination difficulty, and segment-level validation. Charts with many distinct fractional timestamps can require many shared-phase passes. Headless holding segments and segment scoring are not provided by this whole-chart interface.

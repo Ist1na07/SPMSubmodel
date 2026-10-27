@@ -2,7 +2,7 @@
 
 [English](README.md) · [研究与验证报告](docs/research.zh-CN.md)
 
-本项目为 osu!mania 4K、6K、7K 谱面计算两项整谱难度。RC 难度先将所有长键改为头部单点，再在混合谱面中提高单点区域的权重；LN 难度衡量含长键区域的综合难度，并在长键区域只占全谱少量内容时降低结果。同一次调用也返回原始 SPM 难度和未经分段调制的头部单点难度。
+本项目为 osu!mania 4K、6K、7K 谱面计算两项整谱难度。RC 难度先将所有长键改为头部单点，再根据局部 LN 与 RC 难度调整各窗口的权重；LN 难度衡量含长键区域的综合难度，并在长键区域只占全谱少量内容时降低结果。同一次调用也返回 SPM 难度。
 
 实现使用 [SPM Rating](https://github.com/Ist1na07/SPMRating) 提交 `a914a405d8e9a77f94c0518567c37511b0b7ac05` 的 detailed 或 compact 模型。该提交的上游版本为 **1.2.0-rc3** 候选版；本项目评估时尚无 1.2.0 正式标签。上游检出位于 `SPMRating/`。RC/LN 实现调用了上游内部接口，替换该目录后需要重新检查兼容性和评估结果。
 
@@ -20,7 +20,7 @@ python -m unittest discover -s tests -v
 from rcln import rate_file, rate_content
 
 scores = rate_file("chart.osu", model="detail", rate=1.0, scale="raw")
-print(scores["spm"], scores["rc"], scores["ln"], scores["rc_head_only"], scores["ln_coverage"])
+print(scores["spm"], scores["rc"], scores["ln"], scores["ln_coverage"])
 
 with open("chart.osu", encoding="utf-8-sig") as f:
     same = rate_content(f.read(), model="detail", scale="reference")
@@ -30,7 +30,7 @@ with open("chart.osu", encoding="utf-8-sig") as f:
 
 默认 `raw` 尺度与上游 Python 接口的原生输出一致。`reference` 对三个分数应用**同一套上游逐键数标定**：7K 的参考尺度对齐所给 7K 标注，4K 与 6K 分别使用各自的标注尺度。比较时应保持键数、模型、倍率和尺度一致。`ln_coverage` 是平滑后长键在场信号覆盖的聚合物量比例，不是长键头部占比。
 
-`rc_head_only` 是所有长键替换为头部单点后，独立计算的 SPM 分数。`rc` 使用同一条头部单点难度曲线，再调整各段对整谱分数的权重。它可能上升或下降，取决于哪个区域更难。纯单点谱上两者都等于 `spm`；长键几乎覆盖全谱时，调制逐渐减弱，结果趋近头部单点分数。
+`rc` 使用头部单点难度曲线，并根据各窗口估计的 LN 与 RC 难度之比调整窗口权重。调制同时参考整谱 LN 与头部单点难度的比值，在 LN 难度明显占主导时逐渐减弱。纯单点谱的 `rc` 等于 `spm`。
 
 目前接口计算整谱。小数原始时间使用上游的共享相位处理；不同小数时间很多时可能需要多次计算。分段难度留待后续研究。
 

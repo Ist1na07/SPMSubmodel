@@ -39,40 +39,13 @@ def dataset(mode):
             v = r['labels'].get(lab) or {}
             if v.get('sr') is not None and not v.get('below_range'): pairs.append((s[out], v['sr']))
         metric(f'{out} vs {lab}', pairs)
-        if lab in ('rc', 'ln'):
-            metric(f'spm vs {lab}', [(s['spm'], r['labels'][lab]['sr']) for r,s in joined
-                   if r['labels'].get(lab) and r['labels'][lab].get('sr') is not None
-                   and not r['labels'][lab].get('below_range')])
     for group, field in [('rc', 'rc'), ('ln', 'ln'), ('hb', 'rc'), ('hb', 'ln')]:
         subset = [(r, s) for r, s in joined if r.get('sort') == group]
         pairs = [(s[field], r['labels'][field]['sr']) for r,s in subset
                  if r['labels'].get(field) and r['labels'][field].get('sr') is not None and not r['labels'][field].get('below_range')]
         metric(f'{group} {field}', pairs)
-        if group in ('rc', 'ln') and subset:
-            diff = [abs(s[field]-s['spm']) for r,s in subset]
-            print(f'  {group} |branch-spm| median={np.median(diff):.4f} p90={np.percentile(diff,90):.4f}')
-    if mode == '7k' and joined and 'rc_head_only' in joined[0][1]:
-        for group in ('rc', 'hb', 'ln', 'mix'):
-            subset = [(r,s) for r,s in joined if r.get('sort') == group]
-            change = np.array([s['rc']-s['rc_head_only'] for r,s in subset])
-            pairs = [(s['rc_head_only'],r['labels']['rc']['sr']) for r,s in subset
-                     if r['labels'].get('rc') and r['labels']['rc'].get('sr') is not None]
-            if len(change):
-                print(f'  {group} RC change n={len(change)} median={np.median(change):+.4f} '
-                      f'p90_abs={np.percentile(abs(change),90):.4f} max_abs={max(abs(change)):.4f}')
-            metric(f'{group} head-only vs rc', pairs)
-            if group == 'hb':
-                improvements = [abs(s['rc_head_only']-r['labels']['rc']['sr'])-abs(s['rc']-r['labels']['rc']['sr'])
-                                for r,s in subset if r['labels'].get('rc') and r['labels']['rc'].get('sr') is not None]
-                print(f'  hb absolute-error changes: improved={sum(x>1e-9 for x in improvements)} '
-                      f'worse={sum(x < -1e-9 for x in improvements)} '
-                      f'unchanged={sum(abs(x)<=1e-9 for x in improvements)}')
     below = [s['ln'] for r,s in joined if (r['labels'].get('ln') or {}).get('below_range')]
     if below: print(f'  below_range n={len(below)} LN median={np.median(below):.4f} p90={np.percentile(below,90):.4f} max={max(below):.4f}')
-    if mode in ('4k', '6k') and scores and all('rc_head_only' in s for s in scores.values()):
-        delta = np.array([s['rc']-s['rc_head_only'] for s in scores.values()])
-        print(f'  chart RC change n={len(delta)} median={np.median(delta):+.4f} '
-              f'p90_abs={np.percentile(abs(delta),90):.4f} max_abs={max(abs(delta)):.4f}')
     if mode == '4k':
         for group in ('jack', 'speed', 'stamina', 'tech', 'course', 'ln'):
             points = [(s['ln' if group == 'ln' else 'rc'],r['labels']['overall']['sr'])
