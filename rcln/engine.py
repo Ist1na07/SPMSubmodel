@@ -59,7 +59,32 @@ def _ln_aggregate(s, field, g, p):
     return score*min(cov/0.40, 1.), cov
 
 
-def _native(notes, model):
+def _rc_aggregate(s, field, g, coverage, p, *, strength=0.95, taper=0.20):
+    """Favor tap-oriented rows on mixed charts using SPM's two-level aggregate."""
+    if int(p['agg_mode']) != 4:
+        raise ValueError('RC aggregation requires the upstream two-level aggregation mode.')
+    intensity = strength*np.clip((1.0-coverage)/taper, 0., 1.)
+    if intensity <= 1e-12:
+        return M.aggregate(s, field, p, hold_w=True)
+    d = np.maximum(np.nan_to_num(field, nan=0., posinf=0., neginf=0.), 0.)
+    env = float(p.get('env_w', 0.))
+    if env:
+        d = (1-env)*d + env*M._peak_envelope(s, d, max(float(p.get('env_ms', 800.)), 50.))
+    dn = np.zeros(s.n); dn[:-1] = s.dt_diff
+    dp = np.zeros(s.n); dp[1:] = dn[:-1]; dp[s.starts[:-1]] = 0.
+    gp = np.maximum((dn+dp)*.5, 0.)
+    cap = float(p.get('aggw_gap_cap', 0.))
+    if cap > 0: gp = np.minimum(gp, cap)
+    mass = M._aggc_mass(s, gp, p, True)*np.maximum(1.-intensity*g, 0.)
+    inv, chart, _, _, _ = M._aggc_windows(s, *M._aggc_geom(p))
+    a = max(float(p['aggC_pw1']), .05); b = max(float(p['aggC_pw2']), .05)
+    w = np.bincount(inv, weights=mass, minlength=len(chart))
+    v = np.bincount(inv, weights=mass*d**a, minlength=len(chart))
+    window = (v/np.maximum(w, 1e-9))**(1/a)
+    return np.array([(np.sum(w*window**b)/max(np.sum(w), 1e-9))**(1/b)])
+
+
+def _native(notes, model, *, rc_probe=None):
     e = engine.get(); p = dict(model.parameters); local = {**p, 'x_jump_w': 0.}
     other = engine.mirror(notes)
     if (other.col.tobytes(), other.ln_end.tobytes()) < (notes.col.tobytes(), notes.ln_end.tobytes()):
@@ -87,13 +112,17 @@ def _native(notes, model):
         return .5*(parts[0]+parts[1])
     s = full[0][0]; d = field(full, extra)
     star = float(M.postprocess(s, M.aggregate(s, d, p, hold_w=True), p)[0])
+    g = _presence(notes, s)
+    ln, coverage = _ln_aggregate(s, d, g, p)
     if rice:
         sr = rice[0][0]; dr = field(rice, 0.)
-        rc = float(M.postprocess(sr, M.aggregate(sr, dr, p, hold_w=True), p)[0])
+        rc_head_only = float(M.postprocess(sr, M.aggregate(sr, dr, p, hold_w=True), p)[0])
+        rc = float(M.postprocess(sr, _rc_aggregate(sr, dr, g, coverage, p), p)[0])
+        if rc_probe is not None:
+            rc_probe(sr, dr, g, coverage, p)
     else:
-        rc = star
-    ln, coverage = _ln_aggregate(s, d, _presence(notes, s), p)
-    return np.array([star, rc, ln, coverage])
+        rc = rc_head_only = star
+    return np.array([star, rc, ln, coverage, rc_head_only])
 
 
 def rate_notes(notes, model='detail', *, scale='raw', cancel=None):
@@ -111,7 +140,7 @@ def rate_notes(notes, model='detail', *, scale='raw', cancel=None):
     if plan is None:
         values = _native(physical, model)
     else:
-        values = np.zeros(4)
+        values = np.zeros(5)
         for weight, state, _, _ in clock.states(physical, plan):
             if cancel is not None and cancel(): raise InterruptedError('Calculation stopped.')
             values += weight*_native(role.canonical(state) if model.physical_objects else state, model)
@@ -119,8 +148,10 @@ def rate_notes(notes, model='detail', *, scale='raw', cancel=None):
     if scale == 'reference':
         if alignment is None: raise ValueError('No reference alignment for this key count.')
         values[:3] = alignment['scale']*values[:3]**alignment['power']
+        values[4] = alignment['scale']*values[4]**alignment['power']
     return dict(spm=float(values[0]), rc=float(values[1]), ln=float(values[2]),
-                ln_coverage=float(values[3]), key_count=notes.key_count, rate=notes.rate,
+                ln_coverage=float(values[3]), rc_head_only=float(values[4]),
+                key_count=notes.key_count, rate=notes.rate,
                 scale=scale, model=model.name, model_identity=model.identity, heads=physical.n_notes)
 
 

@@ -2,7 +2,7 @@
 
 [简体中文](README.zh-CN.md) · [Research and evaluation](docs/research.md)
 
-This project provides two whole-chart difficulty scores for osu!mania 4K, 6K and 7K charts. RC describes the head-note pattern after turning every long note into a tap. LN describes the difficulty of sections containing long-note play, with a reduction when those sections occupy only a small part of the chart. The same call also returns the original SPM score.
+This project provides two whole-chart difficulty scores for osu!mania 4K, 6K and 7K charts. RC scores the head-note pattern after turning every long note into a tap, with additional weight on tap-oriented sections in mixed charts. LN describes the difficulty of sections containing long-note play, with a reduction when those sections occupy only a small part of the chart. The same call also returns the original SPM score and the unweighted head-only score.
 
 The implementation uses the detailed or compact model of [SPM Rating](https://github.com/Ist1na07/SPMRating) at commit `a914a405d8e9a77f94c0518567c37511b0b7ac05`. At that commit the upstream version is **1.2.0-rc3**, a release candidate; a final 1.2.0 tag was not present when this project was evaluated. The checkout is in `SPMRating/`. The RC/LN code uses internal upstream interfaces, so replacing that checkout requires a new compatibility and evaluation pass.
 
@@ -20,7 +20,7 @@ python -m unittest discover -s tests -v
 from rcln import rate_file, rate_content
 
 scores = rate_file("chart.osu", model="detail", rate=1.0, scale="raw")
-print(scores["spm"], scores["rc"], scores["ln"], scores["ln_coverage"])
+print(scores["spm"], scores["rc"], scores["ln"], scores["rc_head_only"], scores["ln_coverage"])
 
 with open("chart.osu", encoding="utf-8-sig") as f:
     same = rate_content(f.read(), model="detail", scale="reference")
@@ -29,6 +29,8 @@ with open("chart.osu", encoding="utf-8-sig") as f:
 `rate_notes` also accepts an upstream parsed Notes object. `model` can be `detail` or `compact`. The detailed model was used for the dataset evaluation and the LN coverage threshold; the compact model has passed the identity tests but has not been separately calibrated on these datasets. A `cancel` callback may be passed to stop between fractional-time phases. A score requires at least two valid physical heads and follows upstream duplicate and conflicting-object rules.
 
 The default `raw` scale is the upstream Python API's native scale. `reference` applies the **same per-key-count upstream alignment** to all three scores. The 7K reference scale is aligned with the supplied 7K labels; 4K and 6K reference scores use their own label domains. Compare scores within the same key count, model, rate and scale. `ln_coverage` is the fraction of engagement mass covered by the smoothed LN presence signal, not a fraction of LN heads.
+
+`rc_head_only` is the independent SPM score of the chart with long notes replaced by taps. `rc` uses the same head-only difficulty field, then changes how sections contribute to the score. It can rise or fall depending on which section is harder. For a tap-only chart both equal `spm`. On charts almost entirely covered by long notes, the modulation fades toward the head-only score.
 
 The interface currently scores whole charts. It supports the upstream shared-phase treatment of fractional original timestamps; charts with many distinct fractional times may require many passes. Segment scoring is a separate research task.
 
@@ -43,6 +45,7 @@ python evaluation/run.py 6k
 python evaluation/run.py courses
 python evaluation/report.py
 python evaluation/calibrate.py
+python evaluation/experiment_rc.py
 ```
 
 For compact results, add `--model compact` to each scoring command. The report currently summarizes the detailed model. See the research report for definitions, metrics, sample counts, limitations and the course comparison. The upstream source retains its own MIT license and notices in `SPMRating/`.
