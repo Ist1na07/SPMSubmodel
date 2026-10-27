@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+*.nbc
+*.nbi
+.pytest_cache/
+.venv/
+venv/
+dataset/
+maps/
+old/
+results/
+prompt.txt
