@@ -28,9 +28,9 @@ with open("chart.osu", encoding="utf-8-sig") as f:
 
 `rate_notes` also accepts an upstream parsed Notes object. Choose `detail`, `compact` or `detail-4k`. Dataset metrics use `detail`. A chart needs at least two physical note heads and follows upstream rules for duplicate and conflicting objects.
 
-The default `raw` scale matches the upstream Python API. `reference` applies the same upstream piecewise-linear calibration to all three scores for the selected key count. On a pure tap chart, RC equals SPM and raw LN is zero; the reference scale maps that zero through its own calibration. `ln_coverage` reports the share of scoring mass supported by nearby long notes.
+The default `raw` scale matches the upstream Python API. `reference` applies the upstream calibration for the selected key count to all three scores. On a pure tap chart, RC equals SPM and raw LN is zero; the reference scale maps that zero to its calibrated value.
 
-`rc` continuously adjusts each row's weight using local LN and tap demand. It uses the same weighting rule across all charts.
+On a pure hold chart, RC is generally close to the SPM score of its heads played as taps. On a mixed chart, difficult tap passages can score higher than whole-chart SPM. `ln_coverage` is a diagnostic between 0 and 1: the effective number of long-note heads divided by the total number of heads. Each long-note head counts according to local hold demand; tap-only charts return exactly `0.0`. The fraction is reported separately from the score.
 
 The interface currently scores whole charts. It supports the upstream shared-phase treatment of fractional original timestamps; charts with many distinct fractional times may require many passes. Segment scoring is a separate research task.
 
@@ -46,4 +46,4 @@ python evaluation/run.py courses
 python evaluation/report.py
 ```
 
-For compact results, add `--model compact` to each scoring command. The report currently summarizes the detailed model. See the research report for definitions, metrics, sample counts, limitations and the course comparison. The upstream source retains its own MIT license and notices in `SPMRating/`.
+Use `--workers 4` to score files in parallel. The report summarizes the `detail` profile; add `--model compact` to a scoring command to generate a separate set of `compact` results. The [research report](docs/research.md) lists the dataset versions, scoring rules and measured results. The upstream source retains its MIT license and notices in `SPMRating/`.

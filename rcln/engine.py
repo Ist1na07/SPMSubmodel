@@ -1,44 +1,71 @@
-"""RC and LN projections of the SPM Rating v1.3.0-rev2 row scorer."""
-from dataclasses import replace
+"""Local tap and hold projections of SPM Rating v1.3.0 (revision 2)."""
+from dataclasses import dataclass, replace
 import math
 from pathlib import Path
 
 import numpy as np
-from spm_rating import clock, load_model, role, v130_engine as core, v130_rev2 as scorer
+from spm_rating import clock, engine, load_model, v130_engine as core, v130_rev2 as scorer
 from spm_rating.api import align
 from spm_rating._core.parser import parse_content, parse_file
 
-PRESENCE_MS = 700.
-CONTACT_MARGIN_MS = 75.
-LN_EXPOSURE = .15
-RC_STRENGTH = 4.
-RC_MIN_WEIGHT = .10
+LN_LOAD_GAIN = 16.
+LN_HALF_EXPOSURE = 30.
+LN_EXPOSURE_POWER = 2
+RC_ALPHA = .16
+LN_BIAS_RAMP = .35  # Skill units; restores the native offset smoothly at zero.
 
 
 def _tap(notes):
     return replace(notes, is_ln=np.zeros_like(notes.is_ln), ln_end=notes.time.copy())
 
 
-def _presence(notes, query):
-    """Continuous local support from the union of expanded hold intervals."""
-    heads = notes.time[notes.is_ln]
-    tails = notes.ln_end[notes.is_ln]
-    n = len(heads)
-    times, slots = np.unique(
-        np.r_[heads-CONTACT_MARGIN_MS, tails+CONTACT_MARGIN_MS], return_inverse=True)
-    count = np.bincount(slots, weights=np.r_[np.ones(n), -np.ones(n)], minlength=len(times))
-    occupied = (np.cumsum(count)[:-1] > 0).astype(float)
-    return np.sqrt(np.clip(role.interval_mean(times, occupied, query, PRESENCE_MS), 0., 1.))
+def _divide(a, b):
+    return np.divide(a, b, out=np.zeros_like(a), where=b > 0.)
 
 
-def _rc_weight(rc, ln):
-    """Use only local demand; the same function runs at every row."""
-    ratio = ln/np.maximum(rc, 1e-12)
-    return RC_MIN_WEIGHT+(1.-RC_MIN_WEIGHT)/(1.+RC_STRENGTH*ratio**2)
+def _local_mean(t, values, query, half):
+    """Centered triangular mean on sorted rows, evaluated with prefix sums."""
+    query, t = query-t[0], t-t[0]
+    lo, mid, hi = (np.searchsorted(t, x) for x in (query-half, query, query+half))
+
+    def weighted_sum(x):
+        s = np.r_[0., np.cumsum(x)]
+        st = np.r_[0., np.cumsum(x*t)]
+        left, right = s[mid]-s[lo], s[hi]-s[mid]
+        return left+right+(st[mid]-st[lo]-query*left+query*right-st[hi]+st[mid])/half
+
+    return _divide(np.maximum(weighted_sum(values), 0.), weighted_sum(np.ones(len(t))))
+
+
+def _hold_support(notes, query, radius, tau):
+    """Combine the local share of sustained heads and occupied fingers."""
+    t = (notes.time-notes.time[0])*notes.rate
+    end = (notes.ln_end-notes.time[0])*notes.rate
+    q = (query-notes.time[0])*notes.rate
+    duration = np.maximum(end-t, 0.)
+    strength = duration/(duration+tau)
+    head = np.clip(_local_mean(t, strength, q, radius), 0., 1.)
+    h, e, a = t[notes.is_ln], end[notes.is_ln], strength[notes.is_ln]
+    points, slots = np.unique(np.r_[h, e], return_inverse=True)
+    jump = np.bincount(slots, weights=np.r_[a, -a], minlength=len(points))
+    area = np.r_[0., np.cumsum(np.cumsum(jump)[:-1]*np.diff(points))]
+    occupied = (np.interp(q+radius, points, area)-np.interp(q-radius, points, area))/(2*radius)
+    return np.sqrt(head*(-np.expm1(-np.maximum(occupied, 0.)**2)))
+
+
+def _ln_share(load, full, gain):
+    load = gain*load
+    return _divide(load, np.hypot(load, full))
+
+
+def _rc_weight(time, membership, hold, tau, alpha):
+    witness = membership**2
+    nearby = _local_mean(time, witness, time, tau)
+    return 1.+((1.-alpha)/alpha)*nearby*(1.-hold)**2*(1.-witness)
 
 
 def _postprocess(u, heads, v, n0):
-    # Same effective length, high-end compression and scale as rev2.aggregate.
+    # Match the length, compression and scale steps of scorer.aggregate.
     u *= heads/(heads+n0)
     threshold = v[scorer.I_PP_THR]
     if u > threshold:
@@ -46,46 +73,140 @@ def _postprocess(u, heads, v, n0):
     return u*v[scorer.I_PP_SCALE]+v[scorer.I_PP_BIAS]
 
 
-def _native(notes, profile, p, v, support, shape, cancel):
-    beta, gamma, _, n0 = shape
+def _fresh(field, diag, v):
+    stamina = diag[:, 9]
+    return field/(1.+v[scorer.I_C_STAM]*stamina/(stamina+v[scorer.I_STAM_HALF]))
 
-    def forward(nt):
+
+def _ln_load(state, diag, v):
+    """Price native release, coordination, roles and the static support row."""
+    stream_power = 1./v[scorer.I_S_P]
+    action = np.maximum(diag[:, 4], 1e-4)
+    amount = np.maximum(state.a[:, 13], 0.)
+    release = v[scorer.I_A_R_4K if state.key == 4 else scorer.I_A_R]
+    coordination = v[scorer.I_A_CB_4K if state.key == 4 else scorer.I_A_CB]
+    price = v[scorer.I_D_B2]*v[scorer.I_C_S]**stream_power*action**v[scorer.I_AP]
+    load = price*(release*diag[:, 5]/(amount+v[scorer.I_A_C])
+                  +coordination*diag[:, 6]/(amount+v[scorer.I_A_CBC]))
+    load += (v[scorer.I_D_B2]*v[scorer.I_C_JM]**stream_power
+             * action**(v[scorer.I_AJ]/state.a[:, 11])*diag[:, 7])
+    return load+v[scorer.I_HOLD_FLOOR]*state.a[:, -1]
+
+
+@dataclass(frozen=True)
+class _Rows:
+    v: np.ndarray
+    beta: float
+    gamma: float
+    n0: float
+    heads: int
+    z: np.ndarray
+    ln_mass: np.ndarray
+    load: np.ndarray
+    full: np.ndarray
+    hold: np.ndarray
+    ln_heads: np.ndarray
+    tc: np.ndarray
+    tz: np.ndarray
+    tm: np.ndarray
+    td: np.ndarray
+    tap_rows: np.ndarray
+
+    def relative(self, d, m):
+        return scorer.relative(d, m, self.beta, self.gamma)
+
+    def post(self, u, heads):
+        return _postprocess(u, heads, self.v, self.n0)
+
+
+def _rows(notes, model, cancel):
+    """One full forward; mixed and hold charts also share one head-only forward."""
+    p = model.parameters
+    profile = scorer.variant(model.compact)
+    v, v4, support4 = profile.native(p)
+    beta, gamma, mix, n0 = profile.shape(p)
+    v, support = (v4, support4) if notes.key_count == 4 else (v, 0.)
+    mirror = engine.mirror(notes)
+    notes = min((notes, mirror), key=lambda n: (n.col.tobytes(), n.ln_end.tobytes()))
+
+    def forward(nt, diagnostics):
         core.check_cancel(cancel)
-        state = scorer.state_from_notes(nt, profile, p)
-        field, _ = scorer.field(state.a, state.b, state.t, state.key, v,
-                                profile.compact, profile.hill, profile.xsoft,
-                                ln_support=support)
-        mass, demand = scorer.row_mass(field, state.gp, state.amount, state.held,
-                                       state.env_half, v)
-        return state.t, field, mass, demand
+        s = scorer.state_from_notes(nt, profile, p)
+        core.check_cancel(cancel)
+        d, diag = scorer.field(s.a, s.b, s.t, s.key, v, profile.compact,
+                               profile.hill, profile.xsoft, diagnostics, support)
+        core.check_cancel(cancel)
+        m, z = scorer.row_mass(d, s.gp, s.amount, s.held, s.env_half, v)
+        return s, d, diag, m, z
 
-    def pool(field, demand, mass):
-        if np.any(mass > 0.):
-            return scorer.relative(demand, mass, beta, gamma)
-        return .50*np.max(field)  # Native fallback for a single tap row.
+    s, d, diag, m, z = forward(notes, bool(notes.n_ln))
+    u = scorer.relative(z, m, beta, gamma) if np.any(m > 0.) else .50*d.max()
+    if mix < 1. and np.any(m > 0.):
+        ph, sl, nb, ev = scorer.phase_structure(s)
+        u = mix*u+(1.-mix)*scorer.pooled_shared(z, m, ph, sl, ev, nb, s.win_ms, v)
+    spm = _postprocess(u, notes.n_notes, v, n0)
+    if not notes.n_ln:
+        return spm, None
 
-    query, field, mass, demand = forward(notes)
-    heads = notes.n_notes
-    spm = _postprocess(pool(field, demand, mass), heads, v, n0)
-    if not notes.n_ln:  # Exact identity: the tap projection would be the same chart.
+    tap, td, tap_diag, tm, tz = forward(_tap(notes), True)
+    fb = _fresh(d, diag, v)
+    delta = np.maximum(fb-np.interp(s.t, tap.t, _fresh(td, tap_diag, v)), 0.)
+    load = _ln_load(s, diag, v)
+    # The counterfactual field difference only contributes with physical LN load.
+    load += _divide(load*delta, load+.5*delta)
+    half = .5*p['w_r']
+    hold = _hold_support(notes, s.t, half, p['r_sim_tau'])
+    ln_heads = s.head_pos[notes.is_ln]
+    if len(s.t) > len(tap.t):
+        # A static chord's single virtual row belongs to its physical heads,
+        # even when its offset lies outside the ordinary release window.
+        hold[-1] = hold[ln_heads[0]]
+        ln_heads = np.full_like(ln_heads, len(s.t)-1)
+    v_unheld = v.copy()
+    v_unheld[scorer.I_HOLD_MASS] = 0.
+    unheld, _ = scorer.row_mass(d, s.gp, s.amount, s.held, s.env_half, v_unheld)
+    tap_rows = np.searchsorted(s.t, tap.t)
+    return spm, _Rows(v, beta, gamma, n0, notes.n_notes, z, unheld,
+                      _local_mean(s.t, load, s.t, half), _local_mean(s.t, fb, s.t, half),
+                      hold, ln_heads, tap.t, tz, tm, td, tap_rows)
+
+
+def _ln_root(rows, share, membership):
+    mass = rows.ln_mass*membership
+    return rows.relative(rows.z*share, mass) if np.any(mass > 0.) else 0.
+
+
+def _ln_score(rows, root, exposed, half_exposure):
+    if root <= 0. or exposed <= 0.:
+        return 0.
+    count = exposed**LN_EXPOSURE_POWER
+    u = root*count/(count+half_exposure**LN_EXPOSURE_POWER)
+    bias = rows.v[scorer.I_PP_BIAS]
+    return rows.post(u, exposed)-bias+bias*u/(u+LN_BIAS_RAMP)
+
+
+def _rc_score(rows, membership, alpha):
+    w = _rc_weight(rows.tc, membership[rows.tap_rows], rows.hold[rows.tap_rows],
+                   rows.v[scorer.I_TAU_STAM], alpha)
+    u = rows.relative(rows.tz, rows.tm*w) if np.any(rows.tm > 0.) else .50*rows.td.max()
+    return rows.post(u, rows.heads)
+
+
+def _phase(notes, model, cancel):
+    spm, rows = _rows(notes, model, cancel)
+    if rows is None:
         return np.array([spm, spm, 0., 0.])
-
-    g = _presence(notes, query)
-    ln_mass = mass*g
-    coverage = float(ln_mass.sum()/mass.sum()) if np.any(mass > 0.) else float(g.max())
-    ln = _postprocess(pool(field*g, demand, ln_mass), heads*coverage, v, n0)
-    ln *= coverage/(coverage+LN_EXPOSURE*(1.-coverage))
-
-    rc_query, rc_field, rc_mass, rc_demand = forward(_tap(notes))
-    # The original state can have an extra virtual sustain row; the tap
-    # projection uses only physical head times, which are shared.
-    ln_at_heads = (g*demand)[np.searchsorted(query, rc_query)]
-    rc = _postprocess(pool(rc_field, rc_demand, rc_mass*_rc_weight(rc_demand, ln_at_heads)),
-                      heads, v, n0)
-    return np.array([spm, rc, ln, coverage])
+    core.check_cancel(cancel)
+    share = _ln_share(rows.load, rows.full, LN_LOAD_GAIN)
+    membership = share*rows.hold
+    exposed = float(membership[rows.ln_heads].sum())
+    ln = _ln_score(rows, _ln_root(rows, share, membership), exposed, LN_HALF_EXPOSURE)
+    rc = _rc_score(rows, membership, RC_ALPHA)
+    return np.array([spm, rc, ln, exposed])
 
 
 def rate_notes(notes, model='detail', *, scale='raw', cancel=None):
+    """Return whole-chart SPM, tap and long-note scores and head diagnostics."""
     core.check_cancel(cancel)
     if isinstance(model, str):
         model = load_model(model)
@@ -94,27 +215,23 @@ def rate_notes(notes, model='detail', *, scale='raw', cancel=None):
     if model.engine != 'v130' or model.revision != 2:
         raise ValueError('This submodel requires an SPM Rating v1.3.0-rev2 profile.')
     physical = core.physical_notes(notes)
-    p = model.parameters
-    profile = scorer.variant(model.compact)
-    v, v4, support = profile.native(p)
-    is4k = physical.key_count == 4
-    shape = profile.shape(p)
+    _check_rate(physical.rate)
     plan = clock.plan(physical)
-    args = (profile, p, v4 if is4k else v, support if is4k else 0., shape, cancel)
     if plan is None:
-        values = _native(physical, *args)
+        values = _phase(physical, model, cancel)
     else:
         values = np.zeros(4)
         for weight, state, _, _ in clock.states(physical, plan):
             core.check_cancel(cancel)
-            values += weight*_native(core.physical_notes(state), *args)
+            values += weight*_phase(core.physical_notes(state), model, cancel)
 
     if scale == 'reference':
         calibration = model.alignment[str(physical.key_count)]
         values[:3] = [align(calibration, raw) for raw in values[:3]]
     return dict(spm=float(values[0]), rc=float(values[1]), ln=float(values[2]),
-                ln_coverage=float(values[3]), key_count=physical.key_count, rate=physical.rate,
-                scale=scale, model=model.name, model_identity=model.identity, heads=physical.n_notes)
+                ln_coverage=float(values[3]/physical.n_notes), key_count=physical.key_count,
+                rate=physical.rate, scale=scale, model=model.name, model_identity=model.identity,
+                heads=physical.n_notes)
 
 
 def _check_rate(rate):
