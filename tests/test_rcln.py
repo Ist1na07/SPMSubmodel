@@ -8,8 +8,9 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from rcln import rate_content, rate_notes
-from rcln.engine import _tap, _rc_aggregate
+from rcln.engine import _rc_weight
 from spm_rating import rate_notes as upstream, load_model
+from spm_rating.api import align
 from spm_rating import engine
 
 
@@ -25,13 +26,12 @@ def chart(keys, kind):
 
 class Scores(unittest.TestCase):
     def test_upstream_and_supported_modes(self):
-        for model in ('detail', 'compact'):
+        for model in ('detail', 'compact', 'detail-4k'):
             for keys in (4, 6, 7):
                 for kind in ('tap', 'ln', 'mixed'):
                     with self.subTest(model=model, keys=keys, kind=kind):
                         notes = engine.parser.parse_content(chart(keys, kind), rate=1.25)
                         got = rate_notes(notes, model)
-                        self.assertNotIn('rc_head_only', got)
                         self.assertAlmostEqual(got['spm'], upstream(notes, model)['score'], places=10)
                         if kind == 'tap': self.assertEqual(got['rc'], got['spm'])
                         if kind == 'ln':
@@ -51,8 +51,8 @@ class Scores(unittest.TestCase):
         got = rate_notes(notes, scale='reference')
         self.assertAlmostEqual(got['spm'], upstream(notes, 'detail', scale='reference')['score'], places=9)
         raw = rate_notes(notes); cal = load_model('detail').alignment['7']
-        self.assertAlmostEqual(got['ln'], cal['scale']*raw['ln']**cal['power'], places=10)
-        self.assertAlmostEqual(got['rc'], cal['scale']*raw['rc']**cal['power'], places=10)
+        for key in ('spm', 'rc', 'ln'):
+            self.assertAlmostEqual(got[key], align(cal, raw[key]), places=10)
 
     def test_input_and_cancel(self):
         with self.assertRaises(ValueError): rate_content(chart(5, 'tap'))
@@ -60,15 +60,20 @@ class Scores(unittest.TestCase):
         with self.assertRaises(InterruptedError): rate_content(chart(7, 'tap'), cancel=lambda: True)
 
     def test_local_ln_difficulty_changes_rc_weights(self):
-        notes = engine.parser.parse_content(chart(7, 'mixed'))
-        e = engine.get(); p = dict(load_model('detail').parameters)
-        full = e.build(notes, p); rice = e.build(_tap(notes), p)
-        g = (full.t >= 5500).astype(float)
-        rc = np.where(g == 0, 10., 5.)
-        weak_ln = np.where(g == 0, 2., 1.)
-        strong_ln = np.where(g == 0, 2., 20.)
-        low = _rc_aggregate(full, rice, weak_ln, rc, g, 1., 1., p)[0]
-        high = _rc_aggregate(full, rice, strong_ln, rc, g, 1., 1., p)[0]
-        self.assertGreater(high, low)
+        rc = np.array([2., 2., 2., 4.])
+        weight = _rc_weight(rc, np.array([0., 1., 2., 2.]))
+        self.assertEqual(weight[0], 1.)
+        self.assertGreater(weight[1], weight[2])
+        self.assertAlmostEqual(weight[1], weight[3])
+
+    def test_static_hold_uses_upstream_support_row(self):
+        chart_text = chart(4, 'ln').split('[HitObjects]')[0] + (
+            '[HitObjects]\n64,192,1000,128,0,3000:0:0:0:0:\n'
+            '192,192,1000,128,0,3000:0:0:0:0:')
+        notes = engine.parser.parse_content(chart_text)
+        got = rate_notes(notes)
+        self.assertAlmostEqual(got['spm'], upstream(notes, 'detail')['score'], places=10)
+        self.assertGreater(got['ln'], 0.)
+        self.assertTrue(np.isfinite(got['rc']))
 
 if __name__ == '__main__': unittest.main()

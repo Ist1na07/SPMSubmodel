@@ -2,9 +2,9 @@
 
 [简体中文](README.zh-CN.md) · [Research and evaluation](docs/research.md)
 
-This project provides two whole-chart difficulty scores for osu!mania 4K, 6K and 7K charts. RC scores the head-note pattern after turning every long note into a tap, with window weights informed by local LN and RC difficulty. LN describes the difficulty of sections containing long-note play, with a reduction when those sections occupy only a small part of the chart. The same call also returns the SPM score.
+Score the same osu!mania 4K, 6K or 7K chart three ways: the original SPM score, RC difficulty for the tap pattern at note heads, and LN difficulty for play involving holds. The branches use the same difficulty engine and log-logistic row aggregation as SPM. They change how much each row contributes to the score.
 
-The implementation uses the detailed or compact model of [SPM Rating](https://github.com/Ist1na07/SPMRating) at commit `a914a405d8e9a77f94c0518567c37511b0b7ac05`. At that commit the upstream version is **1.2.0-rc3**, a release candidate; a final 1.2.0 tag was not present when this project was evaluated. The checkout is in `SPMRating/`. The RC/LN code uses internal upstream interfaces, so replacing that checkout requires a new compatibility and evaluation pass.
+The submodule pins [SPM Rating v1.3.0, revision 2](https://github.com/Ist1na07/SPMRating/tree/4cbccb5de77e592d201d475041c67aa339ba544a). The branch scorer uses its native engine interfaces.
 
 ## Run
 
@@ -26,11 +26,11 @@ with open("chart.osu", encoding="utf-8-sig") as f:
     same = rate_content(f.read(), model="detail", scale="reference")
 ```
 
-`rate_notes` also accepts an upstream parsed Notes object. `model` can be `detail` or `compact`. The detailed model was used for the dataset evaluation and the LN coverage threshold; the compact model has passed the identity tests but has not been separately calibrated on these datasets. A `cancel` callback may be passed to stop between fractional-time phases. A score requires at least two valid physical heads and follows upstream duplicate and conflicting-object rules.
+`rate_notes` also accepts an upstream parsed Notes object. Choose `detail`, `compact` or `detail-4k`. Dataset metrics use `detail`. A chart needs at least two physical note heads and follows upstream rules for duplicate and conflicting objects.
 
-The default `raw` scale is the upstream Python API's native scale. `reference` applies the **same per-key-count upstream alignment** to all three scores. The 7K reference scale is aligned with the supplied 7K labels; 4K and 6K reference scores use their own label domains. Compare scores within the same key count, model, rate and scale. `ln_coverage` is the fraction of engagement mass covered by the smoothed LN presence signal, not a fraction of LN heads.
+The default `raw` scale matches the upstream Python API. `reference` applies the same upstream piecewise-linear calibration to all three scores for the selected key count. On a pure tap chart, RC equals SPM and raw LN is zero; the reference scale maps that zero through its own calibration. `ln_coverage` reports the share of scoring mass supported by nearby long notes.
 
-`rc` uses the head-only difficulty field and changes each window's contribution according to its estimated LN-to-RC difficulty ratio. The modulation also uses the whole-chart LN and head-only difficulty ratio, fading for strongly LN-dominated charts. On a tap-only chart `rc` equals `spm`.
+`rc` continuously adjusts each row's weight using local LN and tap demand. It uses the same weighting rule across all charts.
 
 The interface currently scores whole charts. It supports the upstream shared-phase treatment of fractional original timestamps; charts with many distinct fractional times may require many passes. Segment scoring is a separate research task.
 
@@ -44,8 +44,6 @@ python evaluation/run.py 4k
 python evaluation/run.py 6k
 python evaluation/run.py courses
 python evaluation/report.py
-python evaluation/calibrate.py
-python evaluation/experiment_rc.py
 ```
 
 For compact results, add `--model compact` to each scoring command. The report currently summarizes the detailed model. See the research report for definitions, metrics, sample counts, limitations and the course comparison. The upstream source retains its own MIT license and notices in `SPMRating/`.

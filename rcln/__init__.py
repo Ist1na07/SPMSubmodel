@@ -1,4 +1,4 @@
-"""RC and long-note difficulty on the pinned SPM Rating candidate."""
+"""RC and long-note difficulty on the pinned SPM Rating engine."""
 import sys
 from pathlib import Path
 

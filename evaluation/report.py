@@ -85,7 +85,7 @@ def courses():
 
 if __name__ == '__main__':
     ap = argparse.ArgumentParser()
-    ap.add_argument('--suffix', default='', help='Suffix after detail in result filenames, such as -rc11')
+    ap.add_argument('--suffix', default='-v130', help='Suffix after detail in result filenames')
     SUFFIX = ap.parse_args().suffix
     for mode in DATASETS: dataset(mode)
     courses()
